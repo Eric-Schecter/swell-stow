@@ -1,0 +1,473 @@
+extends Node3D
+
+const HEIGHT := 0.22
+const START_WIDTH := 2.65
+const COLORS := [Color("e9a99a"),Color("efc39e"),Color("eed8af"),Color("a8cfc2"),Color("b4b0d4"),Color("bfcbd8")]
+var layers: Array[Node3D] = []
+var scraps: Array[Dictionary] = []
+var decorations: Array[Node3D] = []
+var ripples: Array[Dictionary] = []
+var current: Node3D
+var top_pos := Vector3.ZERO
+var width := Vector2(START_WIDTH, START_WIDTH)
+var axis := 0
+var score := 0
+var streak := 0
+var best := 0
+var phase := 0.0
+var time := 0.0
+var playing := false
+var settling := false
+var queued := false
+var ended := false
+var cam: Camera3D
+var light: DirectionalLight3D
+var score_label: Label
+var best_label: Label
+var hint: Label
+var feedback: Label
+var title_label: Label
+var menu: VBoxContainer
+var start_button: Button
+var pause_button: Button
+var paused := false
+var boat: Node3D
+var last_boat_height := 0.0
+var demo := false
+var demo_timer := 0.0
+var demo_done := false
+var save_enabled := true
+
+func material(color: Color) -> StandardMaterial3D:
+ var m := StandardMaterial3D.new()
+ m.albedo_color = color
+ m.roughness = 0.78
+ return m
+
+func block_mesh(size: Vector3) -> ArrayMesh:
+ var st := SurfaceTool.new()
+ st.begin(Mesh.PRIMITIVE_TRIANGLES)
+ st.set_smooth_group(-1)
+ var b: float = min(0.045, min(size.x, min(size.y,size.z))*0.19)
+ var rings: Array = []
+ for data in [[-size.y/2,b],[ -size.y/2+b,0.0],[size.y/2-b,0.0],[size.y/2,b]]:
+  var x: float = size.x/2-data[1]
+  var z: float = size.z/2-data[1]
+  var c: float = b*0.65
+  rings.append([Vector3(-x+c,data[0],-z),Vector3(x-c,data[0],-z),Vector3(x,data[0],-z+c),Vector3(x,data[0],z-c),Vector3(x-c,data[0],z),Vector3(-x+c,data[0],z),Vector3(-x,data[0],z-c),Vector3(-x,data[0],-z+c)])
+ for r in range(3):
+  for i in range(8):
+   var j := (i+1)%8
+   for v in [rings[r][i],rings[r+1][j],rings[r+1][i],rings[r][i],rings[r][j],rings[r+1][j]]:
+    st.add_vertex(v)
+ for i in range(1,7):
+  for v in [rings[0][0],rings[0][i+1],rings[0][i],rings[3][0],rings[3][i],rings[3][i+1]]:
+   st.add_vertex(v)
+ st.generate_normals()
+ return st.commit()
+
+func box(size: Vector3, pos: Vector3, color: Color, parent: Node = self) -> MeshInstance3D:
+ var mesh := MeshInstance3D.new()
+ mesh.mesh = block_mesh(size)
+ mesh.material_override = material(color)
+ parent.add_child(mesh)
+ mesh.position = pos
+ return mesh
+
+func _ready() -> void:
+ save_enabled = not ("--self-test" in OS.get_cmdline_user_args() or "--capture" in OS.get_cmdline_user_args())
+ if save_enabled:
+  var f := FileAccess.open("user://harborlight-player.save",FileAccess.READ)
+  if f: best = int(f.get_as_text())
+ var env := WorldEnvironment.new()
+ env.environment = Environment.new()
+ env.environment.background_mode = Environment.BG_COLOR
+ env.environment.background_color = Color("e8e5d9")
+ env.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+ env.environment.ambient_light_color = Color("fff1de")
+ env.environment.ambient_light_energy = 0.32
+ add_child(env)
+ light = DirectionalLight3D.new()
+ light.rotation_degrees = Vector3(-48,-32,0)
+ light.light_color = Color("fff1dc")
+ light.light_energy = 0.48
+ light.shadow_enabled = true
+ light.directional_shadow_max_distance = 40
+ add_child(light)
+ cam = Camera3D.new()
+ cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+ cam.size = 10.0
+ add_child(cam)
+ cam.position = Vector3(7,7,9)
+ cam.look_at(Vector3(0,0.6,0))
+ box(Vector3(200,0.15,200),Vector3(0,-1,0),Color("94bdc7"))
+ # Pale stone footing; upper construction remains the player's focus.
+ box(Vector3(3.15,0.5,3.15),Vector3(0,-0.65,0),Color("d7d6c3"))
+ box(Vector3(2.85,0.42,2.85),Vector3(0,-0.22,0),Color("f0e5cc"))
+ for i in range(14):
+  var angle := float(i)*TAU/14
+  var stone := box(Vector3(0.4,0.25,0.4),Vector3(cos(angle)*2.1,-0.85,sin(angle)*2.1),Color("c1c8bb"))
+  stone.rotation.y = angle
+ for radius in [2.7,3.4,4.2]:
+  var ring := MeshInstance3D.new()
+  var torus := TorusMesh.new()
+  torus.inner_radius=radius-0.012
+  torus.outer_radius=radius+0.012
+  torus.rings=96
+  torus.ring_segments=6
+  ring.mesh=torus
+  ring.material_override=material(Color("b3d5d7"))
+  ring.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+  add_child(ring)
+  ring.position.y=-0.915
+ build_boat()
+ make_ui()
+ reset_tower()
+ demo = "--capture" in OS.get_cmdline_user_args()
+ DisplayServer.window_move_to_foreground()
+ if "--self-test" in OS.get_cmdline_user_args():
+  run_tests()
+
+func build_boat() -> void:
+ boat = Node3D.new()
+ add_child(boat)
+ boat.position = Vector3(3.8,-0.65,-2.5)
+ box(Vector3(0.45,0.16,0.85),Vector3.ZERO,Color("d7aa88"),boat)
+ box(Vector3(0.035,0.8,0.035),Vector3(0,0.4,0),Color("e4d9be"),boat)
+ var sail := MeshInstance3D.new()
+ var st := SurfaceTool.new()
+ st.begin(Mesh.PRIMITIVE_TRIANGLES)
+ for v in [Vector3(0,0.78,0),Vector3(0,0.12,0),Vector3(0.38,0.12,0)]: st.add_vertex(v)
+ st.generate_normals()
+ sail.mesh=st.commit()
+ var mat := material(Color("fff1ce"))
+ mat.cull_mode=BaseMaterial3D.CULL_DISABLED
+ sail.material_override=mat
+ boat.add_child(sail)
+
+func label(text: String, size: int, color: Color = Color("343442")) -> Label:
+ var l := Label.new()
+ l.text=text
+ l.add_theme_font_size_override("font_size",size)
+ l.add_theme_color_override("font_color",color)
+ l.horizontal_alignment=HORIZONTAL_ALIGNMENT_CENTER
+ return l
+
+func make_ui() -> void:
+ var canvas := CanvasLayer.new()
+ add_child(canvas)
+ var root := Control.new()
+ root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+ root.mouse_filter=Control.MOUSE_FILTER_IGNORE
+ canvas.add_child(root)
+ var font = load("res://assets/ui-font.ttf")
+ var theme := Theme.new()
+ theme.default_font=font
+ root.theme=theme
+ title_label=label("H A R B O R L I G H T",25)
+ root.add_child(title_label)
+ title_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+ title_label.position.y=32
+ best_label=label("",14,Color("737979"))
+ root.add_child(best_label)
+ best_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+ best_label.position.y=74
+ score_label=label("0",64)
+ root.add_child(score_label)
+ score_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+ score_label.position.y=103
+ feedback=label("",20,Color("537e78"))
+ root.add_child(feedback)
+ feedback.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+ feedback.position.y=180
+ hint=label("",17,Color("59666a"))
+ root.add_child(hint)
+ hint.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+ hint.position.y=-75
+ var sub := label("海 上 灯 塔  /  点击 · 对齐 · 叠高",12,Color("788985"))
+ root.add_child(sub)
+ sub.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+ sub.position.y=-39
+ menu=VBoxContainer.new()
+ root.add_child(menu)
+ menu.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+ menu.position=Vector2(-125,-164)
+ menu.size=Vector2(250,75)
+ start_button=Button.new()
+ start_button.text="开始建造"
+ start_button.focus_mode=Control.FOCUS_NONE
+ start_button.custom_minimum_size=Vector2(250,49)
+ start_button.add_theme_font_size_override("font_size",19)
+ var style := StyleBoxFlat.new()
+ style.bg_color=Color("faf2e2")
+ style.corner_radius_top_left=24
+ style.corner_radius_top_right=24
+ style.corner_radius_bottom_left=24
+ style.corner_radius_bottom_right=24
+ style.content_margin_left=30
+ style.content_margin_right=30
+ start_button.add_theme_stylebox_override("normal",style)
+ start_button.add_theme_color_override("font_color",Color("414b51"))
+ menu.add_child(start_button)
+ start_button.pressed.connect(start)
+ pause_button=Button.new()
+ pause_button.text="Ⅱ"
+ pause_button.focus_mode=Control.FOCUS_NONE
+ root.add_child(pause_button)
+ pause_button.position=Vector2(936,28)
+ pause_button.size=Vector2(40,40)
+ pause_button.pressed.connect(toggle_pause)
+
+func reset_tower() -> void:
+ for l in layers: l.queue_free()
+ layers.clear()
+ if is_instance_valid(current): current.queue_free()
+ for s in scraps: s.node.queue_free()
+ scraps.clear()
+ for d in decorations: d.queue_free()
+ decorations.clear()
+ width=Vector2(START_WIDTH,START_WIDTH)
+ top_pos=Vector3.ZERO
+ score=0
+ streak=0
+ axis=0
+ settling=false
+ queued=false
+ ended=false
+ paused=false
+ layers.append(box(Vector3(width.x,HEIGHT,width.y),top_pos,COLORS[0]))
+ update_ui()
+
+func start() -> void:
+ reset_tower()
+ playing=true
+ menu.hide()
+ feedback.text=""
+ hint.text="点击 / 空格落下 · Esc 暂停"
+ spawn()
+
+func spawn() -> void:
+ axis=score%2
+ phase=-PI/2
+ current=box(Vector3(width.x,HEIGHT,width.y),top_pos+Vector3(0,HEIGHT+0.16,0),COLORS[(score+1)%COLORS.size()])
+ update_moving()
+
+func update_moving() -> void:
+ if not is_instance_valid(current): return
+ current.position=top_pos+Vector3(0,HEIGHT+0.16,0)
+ current.position[axis*2] += sin(phase)*3.45
+
+func drop() -> void:
+ if not playing or paused: return
+ if settling:
+  queued=true
+  return
+ var direction := axis*2
+ var offset: float = current.position[direction]-top_pos[direction]
+ var full: float = width[axis]
+ var overlap: float = full-abs(offset)
+ if overlap <= 0.0:
+  scraps.append({"node":current,"velocity":Vector3(sign(offset)*0.5,0,0),"spin":Vector3(0.5,0.3,0.8),"life":0.0})
+  current=null
+  finish()
+  return
+ var perfect: bool = abs(offset)<0.115
+ var pos := top_pos+Vector3(0,HEIGHT,0)
+ var old_width := width
+ if perfect:
+  streak+=1
+  current.position[direction]=top_pos[direction]
+  feedback.text="完美对齐  ✦  " + str(streak)
+ else:
+  streak=0
+  width[axis]=overlap
+  pos[direction]+=offset*0.5
+  var cut_size := Vector3(old_width.x,HEIGHT,old_width.y)
+  cut_size[direction]=abs(offset)
+  var cut_pos := current.position
+  cut_pos.y=pos.y
+  cut_pos[direction]=top_pos[direction]+sign(offset)*(full/2+abs(offset)/2)
+  var chip := box(cut_size,cut_pos,COLORS[(score+1)%COLORS.size()])
+  var vel := Vector3(0,0.1,0)
+  vel[direction]=sign(offset)*0.9
+  scraps.append({"node":chip,"velocity":vel,"spin":Vector3(0.6,0.2,0.8)*sign(offset),"life":0.0})
+  current.mesh=block_mesh(Vector3(width.x,HEIGHT,width.y))
+  feedback.text="再稳一点，下一层会更窄"
+ settling=true
+ var placed := current
+ layers.append(placed)
+ current=null
+ top_pos=pos
+ score+=1
+ if score>best:
+  best=score
+  if save_enabled:
+   var f := FileAccess.open("user://harborlight-player.save",FileAccess.WRITE)
+   if f: f.store_string(str(best))
+ var tween := create_tween()
+ tween.tween_property(placed,"position",pos,0.14).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+ tween.tween_callback(func():
+  if streak>0 and streak%3==0 or score%8==0:
+   width.x=min(START_WIDTH,width.x+0.3)
+   width.y=min(START_WIDTH,width.y+0.3)
+   top_pos.y+=HEIGHT
+   layers.append(box(Vector3(width.x,HEIGHT,width.y),top_pos,Color("f4dfb5")))
+   feedback.text="加固平台  ·  宽度恢复"
+  if score%8==0:
+   add_lantern()
+   feedback.text="航标点亮  ·  船只正在通过"
+  settling=false
+  if playing:
+   spawn()
+   if queued:
+    queued=false
+    drop()
+ )
+ update_ui()
+
+func add_lantern() -> void:
+ var lantern := Node3D.new()
+ add_child(lantern)
+ lantern.position=top_pos+Vector3(-width.x/2-0.14,0.1,width.y/2-0.05)
+ box(Vector3(0.16,0.12,0.16),Vector3.ZERO,Color("ad9280"),lantern)
+ var bulb := box(Vector3(0.09,0.14,0.09),Vector3(0,0.1,0),Color("ffdf8b"),lantern)
+ var m := material(Color("ffe4a0"))
+ m.emission_enabled=true
+ m.emission=Color("ffc66f")
+ m.emission_energy_multiplier=0.6
+ bulb.material_override=m
+ decorations.append(lantern)
+
+func finish() -> void:
+ playing=false
+ ended=true
+ feedback.text="构件落空了"
+ hint.text="点击下方按钮或按空格，再建一座"
+ start_button.text="再来一局"
+ menu.show()
+
+func toggle_pause() -> void:
+ if not playing: return
+ paused=not paused
+ pause_button.text="▶" if paused else "Ⅱ"
+ hint.text="已暂停 · 点击右上角或按 Esc 继续" if paused else "点击 / 空格落下 · Esc 暂停"
+ # Placement tweens also pause, without disabling the UI.
+ for tw in get_tree().get_processed_tweens():
+  if paused: tw.pause()
+  else: tw.play()
+
+func update_ui() -> void:
+ score_label.text=str(score)
+ best_label.text="最佳高度  %d   /   下个航标  %d 层" % [best,(score/8+1)*8]
+ if not playing and not ended: hint.text="每三次完美对齐获得加宽平台 · 每八层点亮航标"
+
+func _unhandled_input(event: InputEvent) -> void:
+ if event is InputEventKey and event.pressed and not event.echo:
+  if event.keycode==KEY_ESCAPE: toggle_pause()
+  elif event.keycode in [KEY_SPACE,KEY_ENTER]:
+   if playing: drop()
+   else: start()
+ elif event is InputEventMouseButton and event.pressed and event.button_index==MOUSE_BUTTON_LEFT:
+  if playing: drop()
+ elif event is InputEventScreenTouch and event.pressed:
+  if playing: drop()
+
+func _process(delta: float) -> void:
+ time+=delta
+ boat.position.x=2.9+sin(time*0.1)*0.6
+ boat.position.z=-2.8+cos(time*0.15)*0.7
+ boat.position.y=-0.66+sin(time*1.2)*0.035
+ boat.rotation.z=sin(time)*0.025
+ if playing and not paused:
+  if not settling:
+   phase+=delta*(1.05+min(score,40)*0.018) * (3.0 if demo else 1.0)
+   update_moving()
+  for i in range(scraps.size()-1,-1,-1):
+   var s: Dictionary = scraps[i]
+   s.life+=delta
+   s.velocity.y-=delta*7.0
+   s.node.position+=s.velocity*delta
+   s.node.rotation+=s.spin*delta
+   if s.node.position.y < -0.85 or s.life>5:
+    splash(s.node.position)
+    s.node.queue_free()
+    scraps.remove_at(i)
+ # Missed blocks continue falling after the round ends.
+ elif not paused:
+  for i in range(scraps.size()-1,-1,-1):
+   var s: Dictionary=scraps[i]
+   s.velocity.y-=delta*7
+   s.node.position+=s.velocity*delta
+   s.node.rotation+=s.spin*delta
+   if s.node.position.y < -0.85:
+    splash(s.node.position)
+    s.node.queue_free()
+    scraps.remove_at(i)
+ for i in range(ripples.size()-1,-1,-1):
+  var r: Dictionary=ripples[i]
+  r.age+=delta
+  r.node.scale=Vector3.ONE*(0.15+r.age*0.9)
+  r.node.transparency=min(1.0,r.age/1.2)
+  if r.age>1.2:
+   r.node.queue_free()
+   ripples.remove_at(i)
+ var target := Vector3(top_pos.x*0.25,max(0.6,top_pos.y-0.55),top_pos.z*0.25)
+ var desired := target+Vector3(7,6.4,9)
+ cam.position=cam.position.lerp(desired,1-exp(-delta*2.8))
+ cam.look_at(cam.position-Vector3(7,6.4,9))
+ if demo and not demo_done:
+  demo_timer+=delta
+  if not playing and demo_timer>0.3: start()
+  if playing and not settling and is_instance_valid(current):
+   var offset: float=abs(current.position[axis*2]-top_pos[axis*2])
+   var threshold := 0.11 if score%5!=2 else 0.45
+   if offset<threshold: drop()
+  if score>=12:
+   demo_done=true
+   await get_tree().create_timer(0.4).timeout
+   RenderingServer.force_draw()
+   await RenderingServer.frame_post_draw
+   get_viewport().get_texture().get_image().save_png("res://captures/harborlight-gameplay.png")
+   print("CAPTURE PASS: 12 layers, platform recovery, navigation lantern")
+   get_tree().quit()
+
+func splash(pos: Vector3) -> void:
+ var mesh := MeshInstance3D.new()
+ var torus := TorusMesh.new()
+ torus.inner_radius=0.39
+ torus.outer_radius=0.43
+ torus.rings=24
+ torus.ring_segments=8
+ mesh.mesh=torus
+ mesh.material_override=material(Color("e3eee3"))
+ add_child(mesh)
+ mesh.position=Vector3(pos.x,-0.9,pos.z)
+ mesh.scale=Vector3.ONE*0.2
+ ripples.append({"node":mesh,"age":0.0})
+
+func run_tests() -> void:
+ start()
+ current.position=top_pos+Vector3(0,HEIGHT,0)
+ drop()
+ await get_tree().create_timer(0.2).timeout
+ assert(score==1 and streak==1)
+ current.position=top_pos+Vector3(0,HEIGHT,0.5)
+ drop()
+ await get_tree().create_timer(0.2).timeout
+ assert(score==2 and is_equal_approx(width.y,START_WIDTH-0.5))
+ for i in range(3):
+  current.position=top_pos+Vector3(0,HEIGHT,0)
+  drop()
+  await get_tree().create_timer(0.2).timeout
+ assert(width.y>START_WIDTH-0.5)
+ current.position=top_pos+Vector3(10,HEIGHT,10)
+ drop()
+ assert(ended and not playing)
+ start()
+ assert(score==0 and is_equal_approx(width.x,START_WIDTH))
+ toggle_pause()
+ assert(paused)
+ toggle_pause()
+ assert(not paused)
+ print("SELF TEST PASS: perfect, trim on alternating axis, recovery, miss, restart, pause")
+ get_tree().quit()

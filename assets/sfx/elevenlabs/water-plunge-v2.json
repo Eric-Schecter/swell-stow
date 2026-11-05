@@ -1,0 +1,17 @@
+{
+  "provider": "ElevenLabs",
+  "date": "2026-11-05T13:49:34.733Z",
+  "request": {
+    "text": "A heavy rounded object plunging into a deep pool of water. One very clear low, hollow water plop on entry, instantly erupting into a wide wet splash with a short tail of falling water droplets. Close-up realistic water foley, one plunge right at the beginning, isolated on silence. Only the liquid sound, no wooden or metallic knocks, no voice, music, whistle, or synthetic tones.",
+    "duration_seconds": 2,
+    "prompt_influence": 0.9,
+    "model_id": "eleven_text_to_sound_v3",
+    "loop": false
+  },
+  "status": "complete",
+  "httpStatus": 200,
+  "requestId": null,
+  "characterCost": "20",
+  "file": "water-plunge-v2.mp3",
+  "bytes": 33061
+}

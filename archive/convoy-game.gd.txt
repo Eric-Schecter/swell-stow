@@ -1,0 +1,709 @@
+extends Node3D
+
+# One uninterrupted voyage. Joint bias is the previous catch's persistent error.
+const SPACING := 1.62
+const CATCH_RADIUS := 0.76
+const PERFECT_RADIUS := 0.12
+const MAX_VISIBLE := 7
+const COLORS := [Color("e5aa93"),Color("aebbd6"),Color("afc9b9"),Color("e5c48d"),Color("c5b1d4")]
+var fleet: Array[Dictionary] = []
+var incoming: Dictionary = {}
+var loose: Array[Dictionary] = []
+var wakes: Array[Dictionary] = []
+var scenery: Array[Node3D] = []
+var ropes: MeshInstance3D
+var marker: Node3D
+var marker_ring: MeshInstance3D
+var ghost: Node3D
+var lane_left: MeshInstance3D
+var lane_right: MeshInstance3D
+var ui: Control
+var hud: Label
+var headline: Label
+var subline: Label
+var feedback: Label
+var tide_label: Label
+var help_label: Label
+var action: Button
+var pause_button: Button
+var integrity_bar: ProgressBar
+var cam: Camera3D
+var ocean: MeshInstance3D
+var clock_time := 0.0
+var run_time := 0.0
+var wake_timer := 0.0
+var flash_timer := 0.0
+var banner_timer := 0.0
+var chain := 0
+var rescued := 0
+var delivered := 0
+var attempts := 0
+var best := 0
+var integrity := 100.0
+var paused := false
+var mode := "ready"
+var tide := 0.0
+var center := 0.0
+var boat_serial := 0
+var last_catch := 0.0
+var max_action_gap := 0.0
+var demo := false
+var tests := false
+var record := false
+var captured := false
+var capture_pending := false
+var demo_duration := 22.0
+var save_enabled := true
+var effects_root: Node3D
+var banner := ""
+func material(color: Color) -> StandardMaterial3D:
+ var m := StandardMaterial3D.new()
+ m.albedo_color = color
+ m.roughness = 0.78
+ return m
+
+func block_mesh(size: Vector3) -> ArrayMesh:
+ var st := SurfaceTool.new()
+ st.begin(Mesh.PRIMITIVE_TRIANGLES)
+ st.set_smooth_group(-1)
+ var b: float = min(0.045, min(size.x, min(size.y,size.z))*0.19)
+ var rings: Array = []
+ for data in [[-size.y/2,b],[ -size.y/2+b,0.0],[size.y/2-b,0.0],[size.y/2,b]]:
+  var x: float = size.x/2-data[1]
+  var z: float = size.z/2-data[1]
+  var c: float = b*0.65
+  rings.append([Vector3(-x+c,data[0],-z),Vector3(x-c,data[0],-z),Vector3(x,data[0],-z+c),Vector3(x,data[0],z-c),Vector3(x-c,data[0],z),Vector3(-x+c,data[0],z),Vector3(-x,data[0],z-c),Vector3(-x,data[0],-z+c)])
+ for r in range(3):
+  for i in range(8):
+   var j := (i+1)%8
+   for v in [rings[r][i],rings[r+1][j],rings[r+1][i],rings[r][i],rings[r][j],rings[r+1][j]]:
+    st.add_vertex(v)
+ for i in range(1,7):
+  for v in [rings[0][0],rings[0][i+1],rings[0][i],rings[3][0],rings[3][i],rings[3][i+1]]:
+   st.add_vertex(v)
+ st.generate_normals()
+ return st.commit()
+
+func box(size: Vector3, pos: Vector3, color: Color, parent: Node = self) -> MeshInstance3D:
+ var mesh := MeshInstance3D.new()
+ mesh.mesh = block_mesh(size)
+ mesh.material_override = material(color)
+ parent.add_child(mesh)
+ mesh.position = pos
+ return mesh
+
+func cylinder(radius: float, height: float, pos: Vector3, color: Color, parent: Node=self) -> MeshInstance3D:
+ var n := MeshInstance3D.new()
+ var mesh := CylinderMesh.new()
+ mesh.top_radius=radius
+ mesh.bottom_radius=radius
+ mesh.height=height
+ mesh.radial_segments=24
+ n.mesh=mesh
+ n.material_override=material(color)
+ parent.add_child(n)
+ n.position=pos
+ return n
+
+func make_boat(color: Color, tug: bool = false) -> Node3D:
+ var ship := Node3D.new()
+ add_child(ship)
+ var hull := Node3D.new()
+ ship.add_child(hull)
+ box(Vector3(0.72,0.23,1.18),Vector3(0,0.0,-0.06),color,hull)
+ # A faceted pointed bow faces +Z.
+ var bow := MeshInstance3D.new()
+ var vertices := PackedVector3Array([Vector3(-0.36,-0.115,0.5),Vector3(0.36,-0.115,0.5),Vector3(0,-0.115,0.95),Vector3(-0.36,0.115,0.5),Vector3(0.36,0.115,0.5),Vector3(0,0.115,0.95)])
+ var st := SurfaceTool.new()
+ st.begin(Mesh.PRIMITIVE_TRIANGLES)
+ st.set_smooth_group(-1)
+ for i in [3,4,5,0,2,1,0,1,4,0,4,3,1,2,5,1,5,4,2,0,3,2,3,5]: st.add_vertex(vertices[i])
+ st.generate_normals()
+ bow.mesh=st.commit()
+ var bm := material(color)
+ bm.cull_mode=BaseMaterial3D.CULL_DISABLED
+ bow.material_override=bm
+ hull.add_child(bow)
+ box(Vector3(0.61,0.045,1.05),Vector3(0,0.14,-0.05),Color("f0dfbf"),hull)
+ box(Vector3(0.48,0.4,0.47),Vector3(0,0.36,-0.2),Color("fff0d1"),hull)
+ box(Vector3(0.54,0.07,0.54),Vector3(0,0.6,-0.2),color,hull)
+ box(Vector3(0.35,0.14,0.02),Vector3(0,0.4,0.045),Color("829eaa"),hull)
+ for x in [-0.25,0.25]:
+  box(Vector3(0.015,0.14,0.22),Vector3(x,0.39,-0.2),Color("8da9b1"),hull)
+ cylinder(0.04,0.38,Vector3(0.15,0.81,-0.25),Color("b1a48b"),hull)
+ for x in [-0.37,0.37]:
+  for z in [-0.35,0.1]:
+   cylinder(0.065,0.11,Vector3(x,0.02,z),Color("6c8587"),hull).rotation_degrees.z=90
+
+ if tug:
+  cylinder(0.09,0.36,Vector3(0,0.8,-0.2),Color("697e80"),hull)
+  cylinder(0.12,0.07,Vector3(0,1.0,-0.2),Color("e4b88c"),hull)
+ return ship
+
+func _ready() -> void:
+ var args := OS.get_cmdline_user_args()
+ demo="--demo" in args
+ tests="--self-test" in args
+ record="--record" in args
+ for a in args:
+  if a.begins_with("--duration="): demo_duration=float(a.get_slice("=",1))
+ save_enabled=not demo and not tests
+ if save_enabled and FileAccess.file_exists("user://convoy-best.txt"):
+  var f := FileAccess.open("user://convoy-best.txt",FileAccess.READ)
+  best=int(f.get_as_text())
+ build_world()
+ make_ui()
+ reset_run()
+ DisplayServer.window_move_to_foreground()
+ if tests: run_tests()
+ elif demo: begin()
+
+func build_world() -> void:
+ var env := WorldEnvironment.new()
+ env.environment=Environment.new()
+ env.environment.background_mode=Environment.BG_COLOR
+ env.environment.background_color=Color("bdd5ce")
+ env.environment.ambient_light_source=Environment.AMBIENT_SOURCE_COLOR
+ env.environment.ambient_light_color=Color("fff6e7")
+ env.environment.ambient_light_energy=0.32
+ add_child(env)
+ var light := DirectionalLight3D.new()
+ light.rotation_degrees=Vector3(-58,-28,0)
+ light.light_energy=0.42
+ light.light_color=Color("fff1df")
+ light.shadow_enabled=true
+ light.directional_shadow_max_distance=40
+ add_child(light)
+ cam=Camera3D.new()
+ cam.projection=Camera3D.PROJECTION_ORTHOGONAL
+ cam.size=13.5
+ add_child(cam)
+ cam.position=Vector3(5,17,12)
+ cam.look_at(Vector3(0,0,1.2))
+ ocean=box(Vector3(180,0.2,180),Vector3(0,-0.56,0),Color("8cbfc2"))
+ effects_root=Node3D.new()
+ add_child(effects_root)
+ # Sandy banks scroll past the continuously sailing convoy.
+ for side in [-1,1]:
+  box(Vector3(12,0.38,120),Vector3(side*12.0,-0.26,30),Color("dbd7b6"))
+  for i in range(18):
+   var rock := box(Vector3(0.65+0.16*(i%3),0.27,0.7),Vector3(side*(6.05+0.12*(i%3)),-0.2,-10+i*1.65),Color("c6cbb8"))
+   rock.rotation.y=i*0.9
+   scenery.append(rock)
+  for i in range(9):
+   var buoy := Node3D.new()
+   add_child(buoy)
+   buoy.position=Vector3(side*3.0,-0.2,-10+i*3.6)
+   cylinder(0.12,0.2,Vector3.ZERO,Color("e2b287") if side<0 else Color("adc9ad"),buoy)
+   cylinder(0.025,0.42,Vector3(0,0.25,0),Color("eee0bd"),buoy)
+   scenery.append(buoy)
+ lane_left=box(Vector3(0.035,0.012,40),Vector3(-3.0,-0.447,8),Color("bfd9c6"))
+ lane_right=box(Vector3(0.035,0.012,40),Vector3(3.0,-0.447,8),Color("bfd9c6"))
+ for n in [lane_left,lane_right]: n.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+ ropes=MeshInstance3D.new()
+ ropes.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+ var rm := material(Color("fff0bd"))
+ rm.shading_mode=BaseMaterial3D.SHADING_MODE_UNSHADED
+ rm.cull_mode=BaseMaterial3D.CULL_DISABLED
+ ropes.material_override=rm
+ add_child(ropes)
+ marker=Node3D.new()
+ add_child(marker)
+ marker_ring=MeshInstance3D.new()
+ var torus := TorusMesh.new()
+ torus.inner_radius=0.66
+ torus.outer_radius=0.70
+ torus.rings=48
+ torus.ring_segments=6
+ marker_ring.mesh=torus
+ var mm := material(Color("f5e7b2"))
+ mm.shading_mode=BaseMaterial3D.SHADING_MODE_UNSHADED
+ marker_ring.material_override=mm
+ marker.add_child(marker_ring)
+ marker_ring.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+ ghost=box(Vector3(0.22,0.012,0.08),Vector3(0,0.015,0),Color("fff4cf"),marker)
+ # Bars show the full acceptable catch range, central ring shows ideal alignment.
+ for side in [-1,1]:
+  box(Vector3(0.05,0.02,0.8),Vector3(side*CATCH_RADIUS,0.015,0),Color("dfe9ce"),marker)
+
+func new_member(pos: Vector2, color: Color, tug: bool=false) -> Dictionary:
+ var node := make_boat(color,tug)
+ node.rotation.y=PI
+ node.position=Vector3(pos.x,-0.16,pos.y)
+ return {"node":node,"x":pos.x,"v":0.0,"z":pos.y,"bias":0.0,"age":0.0,"heading":PI,"bank_cd":0.0,"tension":0.0}
+
+func reset_run() -> void:
+ for b in fleet: b.node.queue_free()
+ for b in loose: b.node.queue_free()
+ if not incoming.is_empty(): incoming.node.queue_free()
+ for w in wakes: w.node.queue_free()
+ fleet.clear()
+ loose.clear()
+ wakes.clear()
+ incoming.clear()
+ clock_time=0.0
+ run_time=0.0
+ rescued=0
+ delivered=0
+ attempts=0
+ chain=0
+ integrity=100.0
+ paused=false
+ tide=0.0
+ center=0.0
+ last_catch=0.0
+ max_action_gap=0.0
+ boat_serial=0
+ fleet.append(new_member(Vector2(0,-4.3),Color("dca08a"),true))
+ mode="ready"
+ marker.hide()
+ action.text="启航 · 开始接船"
+ action.show()
+ pause_button.text="Ⅱ"
+ headline.text="把漂来的小船，接成一支船队"
+ subline.text="每次接偏都会留下来，下一艘的接缆点也会跟着偏"
+ feedback.text="对齐船尾光圈时点击 · 不用等船队稳定"
+ help_label.text="点击 / 空格接船    ·    Esc 暂停"
+ update_ui()
+ update_visuals(0.0)
+
+func begin() -> void:
+ if mode!="ready" and mode!="over": return
+ if mode=="over": reset_run()
+ mode="sailing"
+ headline.text="对齐船尾光圈 · 点击接船"
+ subline.text="接偏会累积；下一艘在收缆时就会进场"
+ action.hide()
+ spawn_incoming()
+
+func tail_target() -> Vector2:
+ var last: Dictionary=fleet.back()
+ return Vector2(last.x,last.z+SPACING)
+
+func spawn_incoming() -> void:
+ boat_serial+=1
+ var side: int=-1 if boat_serial%2==1 else 1
+ var target := tail_target()
+ var node := make_boat(COLORS[rescued%COLORS.size()])
+ var speed: float=2.65+minf(float(rescued)*0.105,2.8)
+ incoming={"node":node,"x":float(side)*5.2,"z":target.y,"speed":-side*speed,"side":side,"age":0.0,"id":boat_serial}
+ node.rotation.y=PI/2 if side<0 else -PI/2
+ node.position=Vector3(incoming.x,-0.16,incoming.z)
+ marker.show()
+
+func activate() -> void:
+ if paused: return
+ if mode in ["ready","over"]: begin()
+ elif mode=="sailing": catch_boat()
+
+func catch_boat() -> void:
+ if mode!="sailing" or paused or incoming.is_empty(): return
+ var target := tail_target()
+ var error: float=incoming.x-target.x
+ var old_id: int=incoming.id
+ attempts+=1
+ max_action_gap=maxf(max_action_gap,run_time-last_catch)
+ last_catch=run_time
+ if absf(error)>CATCH_RADIUS:
+  miss("抛缆落空  ·  船队被扯了一下",error)
+  return
+ var perfect: bool=absf(error)<=PERFECT_RADIUS
+ var member: Dictionary={"node":incoming.node,"x":incoming.x,"v":incoming.speed*0.16,"z":incoming.z,"bias":error,"age":0.0,"heading":PI/2 if incoming.side<0 else -PI/2,"bank_cd":0.0,"tension":0.0}
+ # The catch error becomes this joint's rest offset. It is not reset or recentered.
+ fleet.append(member)
+ incoming={}
+ rescued+=1
+ if perfect:
+  chain+=1
+  integrity=minf(100.0,integrity+4.0)
+  feedback.text="精准接船 ✦ %d  ·  缆绳恢复" % chain
+  if chain%3==0:
+   for i in range(1,fleet.size()):
+    fleet[i].bias*=0.65
+    fleet[i].v*=0.65
+   integrity=minf(100.0,integrity+8.0)
+   feedback.text="三连精准  ·  收紧全队，纠正偏移"
+ else:
+  chain=0
+  integrity-=absf(error)*5.0
+  feedback.text="接偏 %+.2f  ·  下一艘接缆点也向%s偏" % [error,"右" if error>0 else "左"]
+  # Immediate reaction reaches the previous boat while the new one is turning.
+  fleet[fleet.size()-2].v+=member.v*0.30
+ flash_timer=0.4
+ if fleet.size()>MAX_VISIBLE:
+  deliver_front()
+ spawn_incoming()
+ assert(incoming.id!=old_id)
+ update_ui()
+
+func miss(message: String, offset: float) -> void:
+ chain=0
+ integrity-=23.0
+ if not incoming.is_empty():
+  loose.append({"node":incoming.node,"x":incoming.x,"z":incoming.z,"vx":incoming.speed,"age":0.0})
+ incoming={}
+ fleet.back().v+=clampf(offset,-1,1)*0.50
+ feedback.text=message
+ flash_timer=0.5
+ if integrity<=0:
+  finish()
+ else:
+  spawn_incoming()
+ update_ui()
+
+func deliver_front() -> void:
+ # A supply launch takes the foremost cargo; preserve the surviving tail's offset.
+ var delivered_boat: Dictionary=fleet[1]
+ fleet.remove_at(1)
+ loose.append({"node":delivered_boat.node,"x":delivered_boat.x,"z":delivered_boat.z,"vx":-2.4,"age":0.0})
+ if fleet.size()>1: fleet[1].bias=fleet[1].x-fleet[0].x
+ delivered+=1
+ integrity=minf(100,integrity+5)
+ banner="前船已送达  ·  +5 缆绳强度"
+ banner_timer=1.1
+
+func step_world(dt: float) -> void:
+ if mode!="sailing" or paused: return
+ clock_time+=dt
+ run_time+=dt
+ tide=sin(run_time*0.73)*(.12+minf(rescued*.012,.24))
+ center=sin(run_time*.15)*minf(float(rescued)*.045,.55)
+ # Two-way lateral spring chain. A new boat moves its predecessor too.
+ var forces: Array[float]=[]
+ for i in range(fleet.size()): forces.append(tide*(0.75+float(i)*0.18))
+ forces[0]+=(center-fleet[0].x)*5.5-fleet[0].v*3.6
+ for i in range(1,fleet.size()):
+  var a: Dictionary=fleet[i-1]
+  var b: Dictionary=fleet[i]
+  var stretch: float=b.x-a.x-b.bias
+  var force: float=-stretch*13.0-(b.v-a.v)*3.7
+  forces[i]+=force
+  forces[i-1]-=force*0.72
+  b.tension=absf(force)+absf(b.x-a.x)*1.8
+  if b.tension>4.6: integrity-=(b.tension-4.6)*dt*0.40
+ for i in range(fleet.size()):
+  var b: Dictionary=fleet[i]
+  b.age+=dt
+  b.bank_cd=maxf(0,b.bank_cd-dt)
+  b.v+=(forces[i]-b.v*0.95)*dt
+  b.x+=b.v*dt
+  b.z=lerpf(b.z,-4.3+float(i)*SPACING,1-exp(-dt*4.5))
+  if absf(b.x-center)>2.48:
+   if b.bank_cd<=0:
+    integrity-=14
+    b.bank_cd=0.7
+    feedback.text="船队擦到浮标线  ·  把下一艘接向航道内侧"
+    flash_timer=0.5
+   b.v-=signf(b.x-center)*dt*2.0
+ if not incoming.is_empty():
+  incoming.age+=dt
+  incoming.x+=(incoming.speed+tide*0.30)*dt
+  incoming.z=lerpf(incoming.z,tail_target().y,1-exp(-dt*7.0))
+  if incoming.x*float(incoming.side)< -5.4:
+   attempts+=1
+   miss("错过一艘  ·  下一艘已进场",-float(incoming.side))
+ if integrity<=0: finish()
+
+func demo_input() -> void:
+ if mode!="sailing" or incoming.is_empty(): return
+ var error: float=incoming.x-tail_target().x
+ var wanted: float=0.0
+ if rescued in [1,2]: wanted=0.38
+ elif rescued==4: wanted=-0.30
+ if (incoming.speed>0 and error>=wanted) or (incoming.speed<0 and error<=wanted): catch_boat()
+
+func _physics_process(dt: float) -> void:
+ if tests or demo: return
+ step_world(dt)
+
+func update_visuals(dt: float) -> void:
+ for i in range(fleet.size()):
+  var b: Dictionary=fleet[i]
+  b.heading=lerp_angle(b.heading,PI-atan(b.v*.55),1-exp(-dt*6.5))
+  b.node.position=Vector3(b.x,-0.16+sin(clock_time*2.5+i*.6)*.018,b.z)
+  b.node.rotation=Vector3(0,b.heading,-clampf(b.v*.1,-.1,.1))
+ if not incoming.is_empty():
+  incoming.node.position=Vector3(incoming.x,-0.16,incoming.z)
+ var target := tail_target()
+ marker.position=Vector3(target.x,-0.43,target.y)
+ marker_ring.scale=Vector3.ONE*(0.98+sin(clock_time*6)*0.025)
+ if not incoming.is_empty():
+  var aligned: bool=absf(incoming.x-target.x)<PERFECT_RADIUS
+  marker_ring.material_override.albedo_color=Color("e8ffb7") if aligned else Color("f4e6b2")
+ var mesh := ImmediateMesh.new()
+ if fleet.size()>1:
+  mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+  for i in range(1,fleet.size()):
+   var a: Dictionary=fleet[i-1]
+   var b: Dictionary=fleet[i]
+   var from := Vector3(a.x,0.05,a.z+.56)
+   var to := Vector3(b.x,0.05,b.z-.58)
+   var side := (to-from).normalized().cross(Vector3.UP)*.022
+   for v in [from-side,from+side,to+side,from-side,to+side,to-side]: mesh.surface_add_vertex(v)
+  mesh.surface_end()
+ ropes.mesh=mesh
+ lane_left.position.x=center-2.95
+ lane_right.position.x=center+2.95
+ var height: float=clampf(17.0+maxi(0,fleet.size()-4)*1.67,17.0,22.0)
+ cam.size=lerpf(cam.size,height,1-exp(-dt*2.0))
+ var focus := Vector3(0,0,(-4.3+target.y)*.5-.35)
+ var desired := focus+Vector3(4.0,17,11.5)
+ cam.position=cam.position.lerp(desired,1-exp(-dt*2.2))
+ cam.look_at(cam.position-Vector3(4.0,17,11.5))
+
+func _process(dt: float) -> void:
+ if tests: return
+ if demo and not paused and run_time<demo_duration:
+  for i in range(4):
+   step_world(1.0/120)
+   demo_input()
+ if not paused:
+  if mode=="sailing":
+   for n in scenery:
+    n.position.z+=dt*2.0
+    if n.position.z>18: n.position.z-=29
+   wake_timer+=dt
+   if wake_timer>.17:
+    wake_timer=0.0
+    for b in fleet: add_wake(b)
+  flash_timer=maxf(0,flash_timer-dt)
+  banner_timer=maxf(0,banner_timer-dt)
+  update_effects(dt)
+ update_visuals(dt if not paused else 0.0)
+ update_ui()
+ if demo and not captured:
+  if rescued>=6 and run_time>12:
+   captured=true
+   save_capture("res://captures/convoy-chain.png")
+  if mode=="over":
+   print("DEMO ended unexpectedly: rescued=",rescued," integrity=",integrity)
+   get_tree().quit(1)
+ if demo and run_time>=demo_duration and not capture_pending:
+  print("DEMO PASS: rescued=",rescued," delivered=",delivered," integrity=",snappedf(integrity,.1)," max_input_gap=",snappedf(max_action_gap,.01),"s")
+  get_tree().quit()
+
+func add_wake(b: Dictionary) -> void:
+ var w := box(Vector3(0.52,0.012,0.045),Vector3(b.x,-0.44,b.z+.75),Color("cde4d9"),effects_root)
+ w.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+ wakes.append({"node":w,"age":0.0})
+
+func update_effects(dt: float) -> void:
+ for i in range(wakes.size()-1,-1,-1):
+  var w: Dictionary=wakes[i]
+  w.age+=dt
+  w.node.position.z+=dt*2.0
+  w.node.scale.x=1+w.age*.65
+  w.node.transparency=minf(1,w.age/1.25)
+  if w.age>1.25:
+   w.node.queue_free()
+   wakes.remove_at(i)
+ for i in range(loose.size()-1,-1,-1):
+  var b: Dictionary=loose[i]
+  b.age+=dt
+  b.x+=b.vx*dt
+  b.z+=dt*.7
+  b.node.position=Vector3(b.x,-.16,b.z)
+  b.node.rotation.y=lerp_angle(b.node.rotation.y,signf(b.vx)*PI/2,dt*2)
+  if b.age>2.0:
+   b.node.queue_free()
+   loose.remove_at(i)
+
+func finish() -> void:
+ if mode=="over": return
+ mode="over"
+ integrity=0
+ marker.hide()
+ headline.text="缆绳撑不住了"
+ subline.text="船队的偏移和拉扯会累积；下次可以故意向内侧接船纠偏"
+ feedback.text="本次接船 %d 艘  ·  已送达 %d 艘" % [rescued,delivered]
+ action.text="重新启航"
+ action.show()
+ if rescued>best:
+  best=rescued
+  if save_enabled:
+   var f := FileAccess.open("user://convoy-best.txt",FileAccess.WRITE)
+   if f: f.store_string(str(best))
+
+func toggle_pause() -> void:
+ if mode!="sailing": return
+ paused=not paused
+ pause_button.text="▶" if paused else "Ⅱ"
+
+func _unhandled_input(event: InputEvent) -> void:
+ if event is InputEventKey and event.pressed and not event.echo:
+  if event.keycode==KEY_ESCAPE: toggle_pause()
+  elif event.keycode in [KEY_SPACE,KEY_ENTER]: activate()
+ elif event is InputEventMouseButton and event.pressed and event.button_index==MOUSE_BUTTON_LEFT:
+  if mode=="sailing": catch_boat()
+ elif event is InputEventScreenTouch and event.pressed:
+  if mode=="sailing": catch_boat()
+
+func line(text: String, size: int, y: float, color: Color=Color("344e55")) -> Label:
+ var n := Label.new()
+ n.text=text
+ n.horizontal_alignment=HORIZONTAL_ALIGNMENT_CENTER
+ n.add_theme_font_size_override("font_size",size)
+ n.add_theme_color_override("font_color",color)
+ n.mouse_filter=Control.MOUSE_FILTER_IGNORE
+ ui.add_child(n)
+ n.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+ n.position.y=y
+ return n
+
+func make_ui() -> void:
+ var layer := CanvasLayer.new()
+ add_child(layer)
+ ui=Control.new()
+ layer.add_child(ui)
+ ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+ ui.mouse_filter=Control.MOUSE_FILTER_IGNORE
+ var theme := Theme.new()
+ theme.default_font=load("res://assets/ui-font.ttf")
+ ui.theme=theme
+ for rect in [Rect2(0,0,1000,225),Rect2(0,660,1000,160)]:
+  var panel := ColorRect.new()
+  panel.position=rect.position
+  panel.size=rect.size
+  panel.color=Color(0.97,0.96,0.9,0.96)
+  panel.mouse_filter=Control.MOUSE_FILTER_IGNORE
+  ui.add_child(panel)
+ line("T I D E L I N K  /  接 力 拖 航",24,22)
+ hud=line("",15,62,Color("597773"))
+ headline=line("",23,96)
+ subline=line("",15,134,Color("597773"))
+ integrity_bar=ProgressBar.new()
+ ui.add_child(integrity_bar)
+ integrity_bar.position=Vector2(300,176)
+ integrity_bar.size=Vector2(400,27)
+ integrity_bar.scale.y=0.32
+ integrity_bar.show_percentage=false
+ var bg := StyleBoxFlat.new()
+ bg.bg_color=Color("729f9b")
+ bg.set_corner_radius_all(4)
+ var fill := StyleBoxFlat.new()
+ fill.bg_color=Color("f3dfab")
+ fill.set_corner_radius_all(4)
+ integrity_bar.add_theme_stylebox_override("background",bg)
+ integrity_bar.add_theme_stylebox_override("fill",fill)
+ tide_label=line("",14,193,Color("557772"))
+ feedback=line("",17,675)
+ help_label=line("",14,711,Color("597773"))
+ action=Button.new()
+ ui.add_child(action)
+ action.position=Vector2(365,751)
+ action.size=Vector2(270,44)
+ action.focus_mode=Control.FOCUS_NONE
+ action.add_theme_font_size_override("font_size",18)
+ action.add_theme_color_override("font_color",Color("3f5b60"))
+ var style := StyleBoxFlat.new()
+ style.bg_color=Color("fff0d3")
+ style.set_corner_radius_all(22)
+ action.add_theme_stylebox_override("normal",style)
+ action.pressed.connect(activate)
+ pause_button=Button.new()
+ pause_button.text="Ⅱ"
+ pause_button.position=Vector2(936,26)
+ pause_button.size=Vector2(38,38)
+ pause_button.focus_mode=Control.FOCUS_NONE
+ ui.add_child(pause_button)
+ pause_button.pressed.connect(toggle_pause)
+
+func update_ui() -> void:
+ hud.text="接船 %02d   /   已送达 %02d   /   船队 %d 艘   /   最佳 %d" % [rescued,delivered,fleet.size(),best]
+ integrity_bar.value=integrity
+ if mode=="sailing":
+  var offset: float=fleet.back().x-center
+  tide_label.text="缆绳 %d%%    ·    横流 %s    ·    船尾偏移 %+.2f" % [maxi(0,int(integrity)),"→" if tide>0 else "←",offset]
+  if paused: headline.text="已暂停 · Esc 继续"
+  else: headline.text="对齐船尾光圈 · 点击接船"
+  if flash_timer>0:
+   feedback.add_theme_color_override("font_color",Color("527b62") if chain>0 else Color("9b654c"))
+  else:
+   feedback.add_theme_color_override("font_color",Color("456663"))
+  if banner_timer>0: subline.text=banner
+  elif fleet.size()>1: subline.text="上一艘的落点就是下一艘的目标 · 接向内侧可以纠偏"
+ else:
+  tide_label.text="缆绳强度 · 精准接船恢复，撞线与拉扯会消耗"
+
+func save_capture(path: String) -> void:
+ capture_pending=true
+ await RenderingServer.frame_post_draw
+ get_viewport().get_texture().get_image().save_png(path)
+ print("CAPTURE PASS: ",path," boats=",fleet.size()," rescued=",rescued," tail=",tail_target())
+ capture_pending=false
+
+func run_tests() -> void:
+ begin()
+ var target_before := tail_target()
+ incoming.x=target_before.x+0.40
+ var previous: Dictionary=fleet.back()
+ catch_boat()
+ assert(rescued==1 and fleet.size()==2)
+ assert(is_equal_approx(fleet.back().bias,0.40))
+ assert(is_equal_approx(tail_target().x,target_before.x+0.40),"Catch error must become next target")
+ assert(not incoming.is_empty() and fleet.back().age==0,"Next boat is controllable before previous arrival finishes")
+ previous.v=0.0
+ fleet.back().v=1.0
+ step_world(1.0/120)
+ assert(previous.v>.01,"Spring coupling must physically pull predecessor")
+ for i in range(14): step_world(1.0/120)
+ var target_after := tail_target()
+ incoming.x=target_after.x+0.35
+ catch_boat()
+ assert(tail_target().x>target_before.x+.6,"Two errors must accumulate")
+ var integrity_before := integrity
+ for i in range(3):
+  incoming.x=tail_target().x
+  catch_boat()
+ assert(chain==3 and integrity>integrity_before,"Three precise catches must recover the chain")
+ var old_bias: float=fleet[1].bias
+ assert(old_bias<.4,"Recovery must tighten the old error, not just change score")
+ var serial_before: int=incoming.id
+ var hp := integrity
+ incoming.x=tail_target().x+2.0
+ catch_boat()
+ assert(integrity<hp and incoming.id!=serial_before and mode=="sailing","Bad input damages but does not stop play")
+ var t := run_time
+ toggle_pause()
+ step_world(1.0)
+ assert(run_time==t)
+ toggle_pause()
+ # Exercise long continuous play via normal catch input, not score mutation.
+ reset_run()
+ begin()
+ for tick in range(120*32):
+  step_world(1.0/120)
+  if mode=="over": break
+  var error: float=incoming.x-tail_target().x
+  if (incoming.speed>0 and error>=0) or (incoming.speed<0 and error<=0): catch_boat()
+ assert(rescued>=18 and delivered>0 and mode=="sailing","A clean sequence must sustain a moving convoy")
+ print("CONTINUOUS RUN: rescued=",rescued," delivered=",delivered," integrity=",integrity," max_gap=",max_action_gap)
+ var tail_x_before: float=tail_target().x
+ deliver_front()
+ assert(is_equal_approx(tail_target().x,tail_x_before),"Delivery must not erase inherited lateral error")
+ var tail: Dictionary=fleet.back()
+ tail.x=center+2.8
+ tail.bank_cd=0
+ hp=integrity
+ step_world(1.0/120)
+ assert(integrity<hp,"Bank contact must damage accumulated convoy")
+ integrity=1
+ incoming.x=tail_target().x+2
+ catch_boat()
+ assert(mode=="over")
+ activate()
+ assert(mode=="sailing" and rescued==0 and fleet.size()==1)
+ # Repeated legal catches with the same offset must create a real failure cascade.
+ reset_run()
+ begin()
+ var max_tail := 0.0
+ for tick in range(120*35):
+  step_world(1.0/120)
+  max_tail=maxf(max_tail,absf(tail_target().x-center))
+  if mode=="over": break
+  var error: float=incoming.x-tail_target().x
+  if (incoming.speed>0 and error>=0.52) or (incoming.speed<0 and error<=0.52): catch_boat()
+ assert(mode=="over" and max_tail>2.48,"Repeated legal errors must accumulate into a bank-contact loss")
+ print("ERROR CASCADE: rescued=",rescued," max_tail_offset=",max_tail," duration=",run_time)
+ print("SELF TEST PASS: inherited offset, coupled momentum, instant next input, recovery, miss continuity, endless delivery, bank damage, pause, restart, cumulative-error loss")
+ get_tree().quit()

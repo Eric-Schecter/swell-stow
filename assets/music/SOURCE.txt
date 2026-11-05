@@ -1,0 +1,5 @@
+Harbor Hop — original 100 BPM, 76.8-second instrumental loop.
+Created locally with tools/create_casual_audio.py: plucked-string physical
+modelling, soft marimba modes, rounded bass and light brushed/shaker percussion.
+No reference-game music or third-party audio recordings are included.
+44.1 kHz, stereo, 16-bit PCM. Short smooth loop-boundary ramps avoid clicks.

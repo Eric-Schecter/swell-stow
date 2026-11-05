@@ -1,0 +1,7 @@
+.godot/
+.DS_Store
+build/
+.export_templates/
+.env*
+captures/
+audio/

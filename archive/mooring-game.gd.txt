@@ -1,0 +1,527 @@
+extends Node3D
+
+const ANCHOR := Vector2(2.0,0.0)
+const TARGET := Vector2(1.30,0.18)
+var hull: Node3D
+var ship: Node3D
+var rope: MeshInstance3D
+var bollard: Node3D
+var p := Vector2(-1.5,-5.0)
+var velocity := Vector2.ZERO
+var rope_length := 0.0
+var state := "ready"
+var paused := false
+var elapsed := 0.0
+var clock_time := 0.0
+var stage := 0
+var wins := 0
+var best := 0
+var current := Vector2.ZERO
+var speed := 1.55
+var heading := 0.0
+var result_title := ""
+var result_detail := ""
+var main_label: Label
+var detail_label: Label
+var status_label: Label
+var current_label: Label
+var score_label: Label
+var action: Button
+var pause_button: Button
+var spray: Array[Dictionary] = []
+var wakes: Array[Dictionary] = []
+var wake_time := 0.0
+var ui: Control
+var demo_mode := ""
+var captured := false
+var finish_timer := 0.0
+var test_mode := false
+var save_enabled := true
+var cam: Camera3D
+func material(color: Color) -> StandardMaterial3D:
+ var m := StandardMaterial3D.new()
+ m.albedo_color = color
+ m.roughness = 0.78
+ return m
+
+func block_mesh(size: Vector3) -> ArrayMesh:
+ var st := SurfaceTool.new()
+ st.begin(Mesh.PRIMITIVE_TRIANGLES)
+ st.set_smooth_group(-1)
+ var b: float = min(0.045, min(size.x, min(size.y,size.z))*0.19)
+ var rings: Array = []
+ for data in [[-size.y/2,b],[ -size.y/2+b,0.0],[size.y/2-b,0.0],[size.y/2,b]]:
+  var x: float = size.x/2-data[1]
+  var z: float = size.z/2-data[1]
+  var c: float = b*0.65
+  rings.append([Vector3(-x+c,data[0],-z),Vector3(x-c,data[0],-z),Vector3(x,data[0],-z+c),Vector3(x,data[0],z-c),Vector3(x-c,data[0],z),Vector3(-x+c,data[0],z),Vector3(-x,data[0],z-c),Vector3(-x,data[0],-z+c)])
+ for r in range(3):
+  for i in range(8):
+   var j := (i+1)%8
+   for v in [rings[r][i],rings[r+1][j],rings[r+1][i],rings[r][i],rings[r][j],rings[r+1][j]]:
+    st.add_vertex(v)
+ for i in range(1,7):
+  for v in [rings[0][0],rings[0][i+1],rings[0][i],rings[3][0],rings[3][i],rings[3][i+1]]:
+   st.add_vertex(v)
+ st.generate_normals()
+ return st.commit()
+
+func box(size: Vector3, pos: Vector3, color: Color, parent: Node = self) -> MeshInstance3D:
+ var mesh := MeshInstance3D.new()
+ mesh.mesh = block_mesh(size)
+ mesh.material_override = material(color)
+ parent.add_child(mesh)
+ mesh.position = pos
+ return mesh
+
+func _ready() -> void:
+ var args := OS.get_cmdline_user_args()
+ test_mode = "--self-test" in args
+ for a in args:
+  if a.begins_with("--capture="): demo_mode=a.get_slice("=",1)
+ save_enabled=not test_mode and demo_mode.is_empty()
+ if save_enabled and FileAccess.file_exists("user://mooring-best.txt"):
+  var f := FileAccess.open("user://mooring-best.txt",FileAccess.READ)
+  best=int(f.get_as_text())
+ var env := WorldEnvironment.new()
+ env.environment=Environment.new()
+ env.environment.background_mode=Environment.BG_COLOR
+ env.environment.background_color=Color("c6dedb")
+ env.environment.ambient_light_source=Environment.AMBIENT_SOURCE_COLOR
+ env.environment.ambient_light_color=Color("fff6e6")
+ env.environment.ambient_light_energy=0.32
+ add_child(env)
+ var light := DirectionalLight3D.new()
+ light.rotation_degrees=Vector3(-58,-28,0)
+ light.light_energy=0.42
+ light.light_color=Color("fff1dc")
+ light.shadow_enabled=true
+ light.directional_shadow_max_distance=30
+ add_child(light)
+ cam=Camera3D.new()
+ cam.projection=Camera3D.PROJECTION_ORTHOGONAL
+ cam.size=12.6
+ add_child(cam)
+ cam.position=Vector3(8,12,11)
+ cam.look_at(Vector3(0,0,0))
+ box(Vector3(160,0.2,160),Vector3(0,-0.55,0),Color("8cbfc2"))
+ build_harbor()
+ ship=Node3D.new()
+ add_child(ship)
+ build_ship()
+ rope=MeshInstance3D.new()
+ rope.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+ rope.material_override=material(Color("fff1bd"))
+ add_child(rope)
+ make_ui()
+ reset_round()
+ DisplayServer.window_move_to_foreground()
+ if test_mode:
+  run_tests()
+ elif not demo_mode.is_empty():
+  begin()
+
+func cylinder(radius: float, height: float, pos: Vector3, color: Color, parent: Node=self) -> MeshInstance3D:
+ var n := MeshInstance3D.new()
+ var mesh := CylinderMesh.new()
+ mesh.top_radius=radius
+ mesh.bottom_radius=radius
+ mesh.height=height
+ mesh.radial_segments=24
+ n.mesh=mesh
+ n.material_override=material(color)
+ parent.add_child(n)
+ n.position=pos
+ return n
+
+func build_harbor() -> void:
+ # A long quay and a distinct mooring pocket, seen from above.
+ box(Vector3(2.5,0.65,8.0),Vector3(3.5,-0.04,0.0),Color("ddd8bf"))
+ box(Vector3(2.65,0.16,8.1),Vector3(3.43,0.36,0.0),Color("f0dfbd"))
+ for z in range(-4,5):
+  box(Vector3(2.6,0.025,0.028),Vector3(3.42,0.455,z*0.95),Color("d2c5a8"))
+ # Two horizontal jetties delimit the berth; collisions use the same geometry.
+ for z in [-1.65,2.0]:
+  box(Vector3(1.55,0.35,0.28),Vector3(1.55,0.12,z),Color("e3c99f"))
+  for x in [0.87,1.45,2.07]:
+   cylinder(0.09,0.8,Vector3(x,-0.03,z),Color("ad9884"))
+ for z in [-0.9,-0.35,0.3,0.95,1.5]:
+  cylinder(0.14,0.16,Vector3(2.15,0.19,z),Color("849794")).rotation_degrees.z=90
+ bollard=Node3D.new()
+ add_child(bollard)
+ bollard.position=Vector3(ANCHOR.x,0.56,ANCHOR.y)
+ cylinder(0.13,0.22,Vector3.ZERO,Color("b69d70"),bollard)
+ cylinder(0.19,0.06,Vector3(0,0.12,0),Color("f0c47a"),bollard)
+ # White outline of the intended berth; does not mask the actual ship.
+ for x in [0.84,1.73]:
+  for z in range(7):
+   box(Vector3(0.025,0.012,0.13),Vector3(x,-0.436,-0.65+z*0.28),Color("dfebe0"))
+ for z in [-0.75,1.1]:
+  box(Vector3(0.85,0.012,0.025),Vector3(1.29,-0.436,z),Color("dfebe0"))
+ for z in [-4.7,-3.6,-2.5,-1.4,2.7,3.8]:
+  box(Vector3(0.03,0.014,0.3),Vector3(-1.5,-0.435,z),Color("c0dcd4"))
+ # Timing buoy: the ship's bow should draw level before the rope is thrown.
+ cylinder(0.17,0.3,Vector3(-2.3,-0.27,-0.3),Color("edc780"))
+ cylinder(0.035,0.5,Vector3(-2.3,0.05,-0.3),Color("f4e9cb"))
+ cylinder(0.08,0.09,Vector3(-2.3,0.33,-0.3),Color("f6d591"))
+ # Dockside objects stay secondary to the boat and the berth.
+ box(Vector3(0.7,0.7,0.7),Vector3(3.5,0.8,-2.6),Color("b2c9ba"))
+ box(Vector3(0.6,0.45,0.6),Vector3(4.15,0.67,-2.4),Color("dcaa90"))
+ box(Vector3(0.5,0.5,0.5),Vector3(3.6,0.7,2.7),Color("d6bf91"))
+ cylinder(0.1,1.8,Vector3(4.1,1.3,1.4),Color("a4b3a6"))
+ box(Vector3(0.55,0.12,0.2),Vector3(3.95,2.2,1.4),Color("f5dfb0"))
+ add_world_label("泊 位  01",Vector3(3.4,0.6,0.55),26)
+ add_world_label("靠 泊 区",Vector3(1.25,-0.32,1.55),19)
+ add_world_label("航  道",Vector3(-1.5,-0.32,2.9),19)
+
+func add_world_label(text: String, pos: Vector3, size: int) -> void:
+ var l := Label3D.new()
+ l.text=text
+ l.font=load("res://assets/ui-font.ttf")
+ l.font_size=size
+ l.pixel_size=0.009
+ l.modulate=Color("647f7b")
+ l.outline_size=0
+ l.no_depth_test=false
+ l.rotation_degrees.x=-90
+ add_child(l)
+ l.position=pos
+
+func build_ship() -> void:
+ for child in ship.get_children():
+  ship.remove_child(child)
+  child.queue_free()
+ hull=Node3D.new()
+ ship.add_child(hull)
+ var color: Color = [Color("e5a38e"),Color("a8b8d5"),Color("adc5a0")][stage%3]
+ box(Vector3(0.72,0.23,1.18),Vector3(0,0.0,-0.06),color,hull)
+ # A faceted pointed bow faces +Z.
+ var bow := MeshInstance3D.new()
+ var vertices := PackedVector3Array([Vector3(-0.36,-0.115,0.5),Vector3(0.36,-0.115,0.5),Vector3(0,-0.115,0.95),Vector3(-0.36,0.115,0.5),Vector3(0.36,0.115,0.5),Vector3(0,0.115,0.95)])
+ var st := SurfaceTool.new()
+ st.begin(Mesh.PRIMITIVE_TRIANGLES)
+ st.set_smooth_group(-1)
+ for i in [3,4,5,0,2,1,0,1,4,0,4,3,1,2,5,1,5,4,2,0,3,2,3,5]: st.add_vertex(vertices[i])
+ st.generate_normals()
+ bow.mesh=st.commit()
+ var bm := material(color)
+ bm.cull_mode=BaseMaterial3D.CULL_DISABLED
+ bow.material_override=bm
+ hull.add_child(bow)
+ box(Vector3(0.61,0.045,1.05),Vector3(0,0.14,-0.05),Color("f0dfbf"),hull)
+ box(Vector3(0.48,0.4,0.47),Vector3(0,0.36,-0.2),Color("fff0d1"),hull)
+ box(Vector3(0.54,0.07,0.54),Vector3(0,0.6,-0.2),color,hull)
+ box(Vector3(0.35,0.14,0.02),Vector3(0,0.4,0.045),Color("829eaa"),hull)
+ for x in [-0.25,0.25]:
+  box(Vector3(0.015,0.14,0.22),Vector3(x,0.39,-0.2),Color("8da9b1"),hull)
+ cylinder(0.04,0.38,Vector3(0.15,0.81,-0.25),Color("b1a48b"),hull)
+ for x in [-0.37,0.37]:
+  for z in [-0.35,0.1]:
+   cylinder(0.065,0.11,Vector3(x,0.02,z),Color("6c8587"),hull).rotation_degrees.z=90
+
+func make_label(text: String, size: int, color: Color=Color("344d56")) -> Label:
+ var n := Label.new()
+ n.text=text
+ n.horizontal_alignment=HORIZONTAL_ALIGNMENT_CENTER
+ n.add_theme_font_size_override("font_size",size)
+ n.add_theme_color_override("font_color",color)
+ n.mouse_filter=Control.MOUSE_FILTER_IGNORE
+ return n
+
+func ui_line(text: String, size: int, y: float, color: Color=Color("344d56")) -> Label:
+ var n := make_label(text,size,color)
+ ui.add_child(n)
+ n.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+ n.position.y=y
+ return n
+
+func make_ui() -> void:
+ var layer := CanvasLayer.new()
+ add_child(layer)
+ ui=Control.new()
+ layer.add_child(ui)
+ ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+ ui.mouse_filter=Control.MOUSE_FILTER_IGNORE
+ var theme := Theme.new()
+ theme.default_font=load("res://assets/ui-font.ttf")
+ ui.theme=theme
+ ui_line("H A R B O R  /  靠 岸",26,27)
+ score_label=ui_line("",14,69,Color("62817f"))
+ main_label=ui_line("一根缆绳，靠稳一艘船",29,105)
+ detail_label=ui_line("船头接近金色浮标时点击抛缆，惯性会让船继续向前",16,152,Color("526e71"))
+ status_label=ui_line("",18,667)
+ current_label=ui_line("",14,704,Color("577d7d"))
+ action=Button.new()
+ ui.add_child(action)
+ action.position=Vector2(375,747)
+ action.size=Vector2(250,45)
+ action.focus_mode=Control.FOCUS_NONE
+ action.add_theme_font_size_override("font_size",18)
+ action.add_theme_color_override("font_color",Color("3f5b60"))
+ var style := StyleBoxFlat.new()
+ style.bg_color=Color("fff0d3")
+ style.set_corner_radius_all(22)
+ action.add_theme_stylebox_override("normal",style)
+ action.pressed.connect(activate)
+ pause_button=Button.new()
+ pause_button.text="Ⅱ"
+ pause_button.position=Vector2(936,27)
+ pause_button.size=Vector2(38,38)
+ pause_button.focus_mode=Control.FOCUS_NONE
+ ui.add_child(pause_button)
+ pause_button.pressed.connect(toggle_pause)
+
+func reset_round() -> void:
+ p=Vector2(-1.5,-5.0)
+ velocity=Vector2.ZERO
+ elapsed=0.0
+ heading=0.0
+ paused=false
+ current=Vector2([0.0,0.14,-0.1][stage%3], [0.0,0.08,-0.05][stage%3])
+ speed=[1.55,1.8,1.35][stage%3]
+ build_ship()
+ state="ready"
+ rope.hide()
+ action.text="开始进港"
+ action.show()
+ pause_button.text="Ⅱ"
+ main_label.text="一根缆绳，靠稳一艘船"
+ main_label.add_theme_color_override("font_color",Color("344d56"))
+ detail_label.text="船头接近金色浮标时点击抛缆，惯性会让船继续向前"
+ status_label.text="点击 / 空格开始 · Esc 暂停"
+ update_labels()
+ update_ship(0.0)
+
+func begin() -> void:
+ state="approach"
+ velocity=Vector2(current.x,speed+current.y)
+ action.hide()
+ main_label.text="看准时机 · 点击抛缆"
+ detail_label.text="太早会偏离泊位，太晚会冲过头；抛缆后只需观察船的惯性"
+ status_label.text="船头接近金色浮标 → 点击 / 空格"
+
+func activate() -> void:
+ if paused: return
+ if state=="ready": begin()
+ elif state=="approach": throw_rope()
+ elif state=="result":
+  if result_title.begins_with("完美") or result_title.begins_with("靠泊成功"):
+   stage+=1
+  reset_round()
+  begin()
+
+func throw_rope() -> void:
+ if state!="approach" or paused: return
+ var distance := p.distance_to(ANCHOR)
+ if distance>5.2:
+  finish(false,"缆绳够不到","离系缆柱太远了，下次再靠近一点抛缆。")
+  return
+ rope_length=distance
+ elapsed=0.0
+ state="mooring"
+ rope.show()
+ main_label.text="缆绳收紧 · 船正在转向"
+ detail_label.text="缆绳向码头拉，船的惯性继续向前，海流会改变落点"
+ status_label.text="已抛缆 · 观察靠泊轨迹"
+
+# Same fixed-step simulation drives play and the deterministic checks.
+func integrate_mooring(pos: Vector2, vel: Vector2, length: float, flow: Vector2, dt: float) -> Array:
+ length=maxf(1.1,length-0.95*dt)
+ var radius := pos-ANCHOR
+ var distance := radius.length()
+ var direction := radius/maxf(distance,0.001)
+ var radial_speed := vel.dot(direction)
+ var tension := maxf(0.0,11.0*(distance-length)+3.0*radial_speed)
+ var acceleration := -direction*tension-1.25*vel+flow*0.55
+ vel+=acceleration*dt
+ pos+=vel*dt
+ return [pos,vel,length]
+
+func collision(pos: Vector2) -> bool:
+ # Boat radius against the solid quay and the two projecting jetties.
+ if pos.x>1.88 and absf(pos.y)<4.15: return true
+ if pos.x>0.52 and pos.x<2.5:
+  if absf(pos.y+1.65)<0.43 or absf(pos.y-2.0)<0.43: return true
+ return false
+
+func docked(pos: Vector2, vel: Vector2) -> bool:
+ return absf(pos.x-TARGET.x)<0.32 and absf(pos.y-TARGET.y)<0.24 and vel.length()<0.28
+
+func _physics_process(dt: float) -> void:
+ if paused or test_mode: return
+ if state=="approach":
+  velocity=Vector2(current.x+sin(clock_time*0.8)*0.018,speed+current.y)
+  p+=velocity*dt
+  if p.y>3.8:
+   finish(false,"错过泊位","没有及时抛缆，船已驶过码头。")
+  if not demo_mode.is_empty():
+   var trigger := -1.0
+   if demo_mode=="early": trigger=-3.1
+   elif demo_mode=="late": trigger=1.5
+   elif demo_mode=="crash": trigger=2.4
+   if p.y>=trigger: throw_rope()
+ elif state=="mooring":
+  elapsed+=dt
+  var values := integrate_mooring(p,velocity,rope_length,current,dt)
+  p=values[0]
+  velocity=values[1]
+  rope_length=values[2]
+  if collision(p):
+   finish(false,"碰到码头了","船还有向前的惯性，下次提前抛缆。")
+  elif elapsed>5.2:
+   if docked(p,velocity):
+    var perfect := p.distance_to(TARGET)<0.13
+    finish(true,"完美靠泊" if perfect else "靠泊成功","船已停稳。下一艘船的航速和海流会变化。")
+   elif p.y<TARGET.y-0.24:
+    finish(false,"抛缆太早","船停在泊位前方，下次稍晚一点抛缆。")
+   else:
+    finish(false,"抛缆太晚","船滑过了理想停靠点，下次提前一点抛缆。")
+ update_ship(dt)
+ if state in ["approach","mooring"]:
+  wake_time+=dt
+  if wake_time>0.13 and velocity.length()>0.15:
+   wake_time=0.0
+   add_wake()
+
+func finish(success: bool, title: String, detail: String) -> void:
+ state="result"
+ result_title=title
+ result_detail=detail
+ main_label.text=title
+ main_label.add_theme_color_override("font_color",Color("3f7b6b") if success else Color("a06956"))
+ detail_label.text=detail
+ status_label.text="停靠偏差 %.2f 米  /  剩余航速 %.2f" % [p.distance_to(TARGET),velocity.length()]
+ if success:
+  wins+=1
+  best=maxi(best,wins)
+  if save_enabled:
+   var f := FileAccess.open("user://mooring-best.txt",FileAccess.WRITE)
+   if f: f.store_string(str(best))
+ action.text="下一艘船" if success else "再试一次"
+ action.show()
+ update_labels()
+
+func update_labels() -> void:
+ score_label.text="航次 %02d   /   成功靠泊 %d   /   最佳 %d" % [stage+1,wins,best]
+ var flow := "平潮 · 无横流"
+ if current.x>0.01: flow="横流 → 向码头漂移"
+ elif current.x< -0.01: flow="横流 ← 向外海漂移"
+ current_label.text="%s    ·    航速 %.1f    ·    单次点击抛缆" % [flow,speed]
+
+func update_ship(dt: float) -> void:
+ ship.position=Vector3(p.x,-0.16,p.y)
+ if velocity.length()>0.08:
+  var wanted := atan2(velocity.x,velocity.y)
+  # Rudder restores fore-aft alignment as the boat loses speed.
+  if state=="mooring": wanted=lerp_angle(wanted,0.0,clampf(elapsed/5.0,0,1))
+  heading=lerp_angle(heading,wanted,1.0-exp(-dt*3.0))
+ ship.rotation.y=heading
+ hull.rotation.z=sin(clock_time*1.6)*0.025 if state!="result" else 0.0
+ if rope.visible:
+  var from := ship.position+Vector3(0,0.18,0.38).rotated(Vector3.UP,heading)
+  var to := Vector3(ANCHOR.x,0.65,ANCHOR.y)
+  var mesh := ImmediateMesh.new()
+  mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
+  for i in range(17):
+   var t := float(i)/16
+   var v := from.lerp(to,t)
+   v.y-=sin(t*PI)*0.09
+   mesh.surface_add_vertex(v)
+  mesh.surface_end()
+  rope.mesh=mesh
+
+func add_wake() -> void:
+ var n := box(Vector3(0.5,0.012,0.055),ship.position-Vector3(0,0.275,0.65).rotated(Vector3.UP,heading),Color("d8e9dd"))
+ n.rotation.y=heading
+ n.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+ wakes.append({"node":n,"age":0.0})
+
+func toggle_pause() -> void:
+ if state not in ["approach","mooring"]: return
+ paused=not paused
+ pause_button.text="▶" if paused else "Ⅱ"
+ status_label.text="已暂停 · Esc 继续" if paused else ("点击 / 空格抛缆" if state=="approach" else "缆绳收紧中")
+
+func _unhandled_input(event: InputEvent) -> void:
+ if event is InputEventKey and event.pressed and not event.echo:
+  if event.keycode==KEY_ESCAPE: toggle_pause()
+  elif event.keycode in [KEY_SPACE,KEY_ENTER]: activate()
+ elif event is InputEventMouseButton and event.pressed and event.button_index==MOUSE_BUTTON_LEFT:
+  if state=="approach": throw_rope()
+ elif event is InputEventScreenTouch and event.pressed:
+  if state=="approach": throw_rope()
+
+func _process(dt: float) -> void:
+ if not paused:
+  clock_time+=dt
+  for i in range(wakes.size()-1,-1,-1):
+   var w: Dictionary=wakes[i]
+   w.age+=dt
+   w.node.scale.x=1.0+w.age*0.8
+   w.node.transparency=minf(1,w.age/2.0)
+   if w.age>2.0:
+    w.node.queue_free()
+    wakes.remove_at(i)
+ if not demo_mode.is_empty() and not captured:
+  if state=="mooring" and elapsed>1.6 and demo_mode=="turn":
+   captured=true
+   capture("turn")
+  elif state=="result":
+   finish_timer+=dt
+   if finish_timer>0.4:
+    captured=true
+    capture(demo_mode)
+
+func capture(suffix: String) -> void:
+ RenderingServer.force_draw()
+ await RenderingServer.frame_post_draw
+ get_viewport().get_texture().get_image().save_png("res://captures/mooring-"+suffix+".png")
+ print("CAPTURE PASS: ",suffix," | ",main_label.text," | position=",p)
+ get_tree().quit()
+
+func simulate_throw(z: float, flow: Vector2=Vector2.ZERO, incoming: float=1.55, start_x: float=-1.5) -> Dictionary:
+ var pos := Vector2(start_x,z)
+ var vel := Vector2(flow.x,incoming+flow.y)
+ var length := pos.distance_to(ANCHOR)
+ for i in range(625):
+  var values := integrate_mooring(pos,vel,length,flow,1.0/120)
+  pos=values[0]
+  vel=values[1]
+  length=values[2]
+  if collision(pos): return {"hit":true,"success":false,"position":pos}
+ return {"hit":false,"success":docked(pos,vel),"position":pos}
+
+func run_tests() -> void:
+ var good := simulate_throw(-1.0)
+ var early := simulate_throw(-3.1)
+ var late := simulate_throw(1.5)
+ print("SIMULATION: good=",good," early=",early," late=",late)
+ assert(good.success,"On-time throw must berth using real integration")
+ assert(not early.success,"Early throw must fail")
+ assert(not late.success,"Late throw must fail")
+ assert(simulate_throw(2.4).hit,"Very late throw must physically intersect the jetty")
+ assert(collision(Vector2(2.0,0)))
+ assert(collision(Vector2(1,2.0)))
+ assert(not collision(TARGET))
+ var flowing := simulate_throw(-1.0,Vector2(0.14,0.08),1.8)
+ assert(flowing.position.distance_to(good.position)>0.03,"Current and hull speed must affect outcome")
+ for config in [[Vector2(0.14,0.08),1.8],[Vector2(-0.1,-0.05),1.35]]:
+  var achievable := false
+  for k in range(50):
+   var z: float=-3.0+float(k)*0.08
+   var flow: Vector2=config[0]
+   var starting_x: float=-1.5+flow.x*(z+5.0)/(float(config[1])+flow.y)
+   var trial := simulate_throw(z,flow,float(config[1]),starting_x)
+   if trial.success: achievable=true
+  assert(achievable,"Every ship/current combination must have a reachable docking window")
+ begin()
+ toggle_pause()
+ assert(paused)
+ toggle_pause()
+ assert(not paused)
+ throw_rope()
+ assert(state=="result" and result_title=="缆绳够不到")
+ reset_round()
+ assert(state=="ready" and p.y== -5.0)
+ print("SELF TEST PASS: rope physics, on-time berth, early/late failure, quay collision, current, range, pause, reset")
+ get_tree().quit()

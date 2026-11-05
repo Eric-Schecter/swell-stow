@@ -1,0 +1,20 @@
+config_version=5
+[application]
+config/name="Swell & Stow · 风浪装船"
+run/main_scene="res://main.tscn"
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=800
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/size/mode=2
+[rendering]
+renderer/rendering_method="gl_compatibility"
+anti_aliasing/quality/msaa_3d=2
+lights_and_shadows/directional_shadow/16_bits=false
+textures/default_filters/use_nearest_mipmap_filter=false
+[environment]
+defaults/default_clear_color=Color(0.87,0.88,0.83,1)
+
+[physics]
+common/physics_ticks_per_second=120

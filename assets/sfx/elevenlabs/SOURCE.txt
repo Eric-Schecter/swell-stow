@@ -1,0 +1,10 @@
+water-impact-v1.mp3 was generated with ElevenLabs Sound Effects API, SFX v3.
+See water-impact-v1.json for the prompt, parameters and request provenance.
+One generation request. API credentials are never stored in this project.
+The game WAV is decoded to stereo 44.1 kHz PCM, onset trimmed and peak-normalized.
+Playback uses the original pitch. This replaces the synthesized splash samples.
+
+The active water sound is now the user-approved water-plunge-v2.mp3, generated
+with a water-only plop/splash prompt. water-plunge-v2.wav is its 44.1 kHz PCM game
+version with unchanged pitch, a matched peak level and 2 ms edge fades.
+The earlier water-impact-v1 files are retained only for provenance and review.

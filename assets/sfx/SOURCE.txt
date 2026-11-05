@@ -1,0 +1,7 @@
+Original sound effects for Swell & Stow.
+Generated locally by tools/generate_sfx.py using damped wooden modes, filtered
+noise, bubble chirps and short rounded bell tones. No third-party recordings,
+reference-game samples, or music samples are used.
+WAV format: 44.1 kHz, 16-bit stereo PCM. The two loop files are periodic.
+Water impacts were revised with tools/create_casual_audio.py: low cavity impact,
+broadband turbulent crown, and irregular water-drip tails replace pitched chirps.
